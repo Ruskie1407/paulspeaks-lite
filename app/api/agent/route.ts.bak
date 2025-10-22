@@ -1,0 +1,72 @@
+export const dynamic = "force-dynamic";
+export const runtime = "nodejs";
+export const dynamic = 'force-dynamic';
+export const runtime = 'nodejs';
+
+import { NextRequest } from "next/server";
+import { getSupaAdmin } from "../../../lib/supabaseAdmin";
+
+const XAI_URL   = process.env.XAI_BASE_URL || "https://api.x.ai/v1";
+const XAI_KEY   = process.env.XAI_API_KEY || "";
+const XAI_MODEL = process.env.XAI_MODEL || "grok-2";
+
+const jok  = (data: any, init?: ResponseInit) => Response.json({ ok: true, ...data }, init);
+const jerr = (error: string, status = 400, extra?: any) =>
+  Response.json({ ok: false, error, ...extra }, { status });
+
+export async function GET() {
+  if (!XAI_KEY) return jerr("Missing XAI_API_KEY", 500);
+  return jok({ model: XAI_MODEL });
+}
+
+export async function POST(req: NextRequest) {
+  try {
+    if (!XAI_KEY) return jerr("Missing XAI_API_KEY", 500);
+
+    const supa = getSupaAdmin();
+    const body = await req.json().catch(() => ({}));
+    const thread = (body.thread || "paulspeaks").toString();
+    const userText = (body.message || "").toString().trim();
+    if (!userText) return jerr("Missing 'message'");
+
+    const payload = {
+      model: XAI_MODEL,
+      max_tokens: 256,
+      messages: [
+        { role: "system", content: "You are PaulSpeaks Agent. Be concise, helpful, and friendly." },
+        { role: "user",   content: userText }
+      ]
+    };
+
+    const r   = await fetch(`${XAI_URL}/chat/completions`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${XAI_KEY}`, "content-type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    const txt = await r.text();                   // read raw (so we can return it even if not JSON)
+    let data: any = null;
+    try { data = JSON.parse(txt); } catch { /* not JSON */ }
+
+    if (!r.ok) {
+      const msg = (typeof data === "string" || data == null)
+        ? (txt || r.statusText)
+        : (data.error?.message || data.error || r.statusText);
+      return jerr(`XAI error ${r.status}`, 502, { xai: msg });
+    }
+
+    const reply: string =
+      data?.choices?.[0]?.message?.content?.toString() || "";
+
+    const finalReply = reply || "Hello! (no text returned by the model)";
+    const { error: dbErr } = await supa
+      .from("messages")
+      .insert({ thread_id: thread, role: "assistant", content: finalReply });
+
+    if (dbErr) return jerr(`DB insert failed: ${dbErr.message}`, 500);
+
+    return jok({ reply: finalReply, raw: typeof data === "string" ? data : undefined });
+  } catch (e: any) {
+    return jerr(e?.message || "server error", 500);
+  }
+}
